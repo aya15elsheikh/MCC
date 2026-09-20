@@ -16,6 +16,8 @@ services:
 
   api:
     image: mcc-api:local
+    ports:
+      - "8000:8000"
     build:
       context: ./apps/api
       dockerfile: Dockerfile
