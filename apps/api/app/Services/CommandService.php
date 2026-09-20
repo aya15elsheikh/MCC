@@ -11,6 +11,7 @@ use App\Enums\PowerLine;
 use App\Enums\SatelliteMode;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Storage;
+use Illuminate\Support\Facades\Http;
 use WebSocket\Client;
 use App\Jobs\DecodeTelemetryJob;
 use Exception;
@@ -42,6 +43,9 @@ class CommandService
 
     /**
      * Formats the 9-field CSSP frame according to ICD Rev 2.0
+     */
+    /**
+     * Formats the 9-field CSSP frame according to ICD Rev 3.2
      */
     public function buildCsspFrame(Command $command, int $dest, array $data): string
     {
@@ -138,6 +142,111 @@ class CommandService
 
       /*   return pack('C', self::FLAG) . $headerAndData . pack('nC', $crc, self::FLAG); */
         return pack('C', self::FLAG) . $headerAndData . pack('vC', $crc, self::FLAG);
+    }
+
+    private function buildSpaceKeysFrame(int $commandId, string $payload): string
+    {
+        $destination = (int) config('services.space_keys.destination', 0x07);
+        $source = (int) config('services.space_keys.source', 0x01);
+        $body = pack('CCCC', $destination, $source, $commandId, strlen($payload)) . $payload;
+
+        return pack('C', self::FLAG)
+            . $body
+            . pack('vC', $this->calculateCRC16Reflected($body), self::FLAG);
+    }
+
+    private function calculateCRC16Reflected(string $data): int
+    {
+        $crc = 0xFFFF;
+        for ($i = 0; $i < strlen($data); $i++) {
+            $crc ^= ord($data[$i]);
+            for ($j = 0; $j < 8; $j++) {
+                $crc = ($crc & 1) ? (($crc >> 1) ^ 0x8408) : ($crc >> 1);
+            }
+        }
+
+        return $crc & 0xFFFF;
+    }
+
+    private function validateSpaceKeysCrc(string $binary): bool
+    {
+        $length = strlen($binary);
+        if ($length < 8 || ord($binary[0]) !== self::FLAG || ord($binary[$length - 1]) !== self::FLAG) {
+            return false;
+        }
+
+        $body = substr($binary, 1, $length - 4);
+        $received = unpack('v', substr($binary, -3, 2))[1];
+
+        return $this->calculateCRC16Reflected($body) === $received;
+    }
+
+    public function sendSpaceKeysImageWorkflow(array $data = []): array
+    {
+        $commandUrl = rtrim($this->commandUrl, '/');
+        if (str_starts_with($commandUrl, 'http://')) {
+            $commandUrl = 'ws://' . substr($commandUrl, 7);
+        } elseif (str_starts_with($commandUrl, 'https://')) {
+            $commandUrl = 'wss://' . substr($commandUrl, 8);
+        }
+        if (!str_ends_with($commandUrl, '/ws/radio')) {
+            $commandUrl .= '/ws/radio';
+        }
+
+        $capturePayload = pack('C*',
+            (int) ($data['resolution'] ?? 4),
+            (int) ($data['quality'] ?? 9),
+            (int) ($data['flash'] ?? 1),
+            (int) ($data['effect'] ?? 0),
+            (int) ($data['brightness'] ?? 0),
+        );
+        $frames = [
+            $this->buildSpaceKeysFrame(0x15, "\x04"),
+            $this->buildSpaceKeysFrame(0x2B, $capturePayload),
+            $this->buildSpaceKeysFrame(0x28, ''),
+        ];
+        $ackFrames = [];
+
+        $client = new Client($commandUrl, ['timeout' => (int) config('services.command.timeout', 15)]);
+        try {
+            foreach ($frames as $index => $frame) {
+                $client->send($frame, 'binary');
+                $ack = $client->receive();
+                $ackFrames[] = $ack;
+                $decoded = $this->decode(bin2hex($ack));
+                $expected = [0x15, 0x2B, 0x28][$index];
+                if (!$decoded || !$decoded['is_ack'] || !$this->validateSpaceKeysCrc($ack)
+                    || $decoded['command_id'] !== $expected) {
+                    throw new Exception(sprintf('Space Keys command 0x%02X was not acknowledged.', $expected));
+                }
+            }
+        } finally {
+            $client->close();
+        }
+
+        $response = Http::timeout((int) config('services.space_keys.http_timeout', 15))
+            ->accept('*/*')
+            ->get(config('services.space_keys.image_url'));
+        $response->throw();
+        $imageBytes = $response->body();
+        if (!str_starts_with($imageBytes, "\xFF\xD8")) {
+            throw new Exception('Space Keys /image did not return a JPEG.');
+        }
+
+        return ['ack_frames' => $ackFrames, 'image_bytes' => $imageBytes];
+    }
+
+    public function saveDownloadedImage(string $imageBytes, int $logId, ?array $metadata = null): Image
+    {
+        $path = 'satellite_images/original/image_log_' . $logId . '.jpg';
+        Storage::disk('public')->makeDirectory('satellite_images/original');
+        Storage::disk('public')->put($path, $imageBytes);
+
+        return Image::create([
+            'original_path' => $path,
+            'command_log_id' => $logId,
+            'meta_data' => $metadata,
+        ]);
     }
 
     /**
@@ -418,7 +527,9 @@ class CommandService
             'SOFF'  => ['pwrl_id'],
             'GSTLM' => ['tlm_frame_seq_no'],
             'DIMG'  => ['image_id'],
-            'GIMG'  => ['image_id', 'sequence_number', 'window_size'],
+            'GIMG'  => config('services.space_keys.enabled')
+                ? []
+                : ['image_id', 'sequence_number', 'window_size'],
             'STIME' => ['timer_value'],
             'SMODE' => ['mode_id'],
         ];

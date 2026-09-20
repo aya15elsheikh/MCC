@@ -64,6 +64,21 @@ class SendCommandJob implements ShouldQueue, ShouldBeUnique  // ← ADD ShouldBe
         $command = Command::findOrFail($this->commandId);
 
         try {
+            if ($command->name === 'GIMG' && config('services.space_keys.enabled')) {
+                $workflow = $commandService->sendSpaceKeysImageWorkflow($this->data);
+                foreach ($workflow['ack_frames'] as $ackFrame) {
+                    CommandReply::create([
+                        'command_log_id' => $log->id,
+                        'reply_data' => bin2hex($ackFrame),
+                    ]);
+                }
+
+                $image = $commandService->saveDownloadedImage($workflow['image_bytes'], $log->id);
+                $log->update(['status' => 'image_received', 'replied_at' => now()]);
+                Log::info("GIMG: Space Keys image #{$image->id} saved for log #{$log->id}.");
+                return;
+            }
+
             $binaryFrame = $commandService->buildCsspFrame($command, $this->dest, $this->data);
 
             $log->update([

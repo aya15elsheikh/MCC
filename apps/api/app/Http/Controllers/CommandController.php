@@ -167,7 +167,7 @@ class CommandController extends Controller
     }
 
     /**
-     * Download the reconstructed PNG image for a GIMG command log.
+    * Download the image received for a GIMG command log.
      *
      * Route:  GET /api/commands/logs/{id}/image
      *
@@ -201,7 +201,7 @@ class CommandController extends Controller
             $filePath = Storage::disk('public')->path($relativePath);
 
             return response()->file($filePath, [
-                'Content-Type'        => 'image/png',
+                'Content-Type'        => mime_content_type($filePath) ?: 'application/octet-stream',
                 'Content-Disposition' => 'attachment; filename="' . basename($filePath) . '"',
             ]);
         } catch (Exception $e) {

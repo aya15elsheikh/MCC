@@ -65,6 +65,14 @@ return [
         'timeout' => env('COMMAND_API_TIMEOUT', 15),
     ],
 
+    'space_keys' => [
+        'enabled'      => env('SPACE_KEYS_IMAGE_ENABLED', false),
+        'source'       => env('SPACE_KEYS_SOURCE_ADDRESS', 0x01),
+        'destination'  => env('SPACE_KEYS_DESTINATION_ADDRESS', 0x07),
+        'image_url'    => env('SPACE_KEYS_IMAGE_URL', 'http://192.168.4.1/image'),
+        'http_timeout' => env('SPACE_KEYS_IMAGE_TIMEOUT', 15),
+    ],
+
     'decoder' => [
         'url'     => env('DECODER_API_URL', 'http://host.docker.internal:8082'),
         'timeout' => env('DECODER_API_TIMEOUT', 15),
